@@ -31,7 +31,9 @@ import "dart:isolate" show RawReceivePort, ReceivePort, SendPort;
 
 import "dart:math" show min;
 
-import "dart:nativewrappers" show NativeFieldWrapperClass1;
+import "dart:nativewrappers" show 
+        NativeFieldWrapperClass1,
+        NativeFieldWrapperClass2;
 
 import "dart:typed_data" show Uint8List, BytesBuilder;
 

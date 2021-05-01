@@ -328,6 +328,11 @@ class _ProcessUtils {
   }
 
   @patch
+  static bool _resizeTerminal(Process? process, int cols, int rows) {
+    throw new UnsupportedError("ProcessUtils._resizeTerminal");
+  }
+
+  @patch
   static Stream<ProcessSignal> _watchSignal(ProcessSignal signal) {
     throw UnsupportedError("ProcessUtils._watchSignal");
   }
