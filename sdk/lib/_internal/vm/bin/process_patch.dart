@@ -149,6 +149,8 @@ class _ProcessUtils {
   static void _resizeTerminal(Process? process, int cols, int rows) 
       native "Process_ResizeTerminal";
   @patch
+  static void _closeTerminal(Process? process) native "Process_CloseTerminal";
+  @patch
   static Stream<ProcessSignal> _watchSignal(ProcessSignal signal) {
     if (signal != ProcessSignal.sighup &&
         signal != ProcessSignal.sigint &&
@@ -443,6 +445,9 @@ class _ProcessImpl extends _ProcessImplNativeWrapper implements Process {
             // Kill stdin, helping hand if the user forgot to do it.
             if (_modeHasStdio(_mode)) {
               (_stdin!._sink as _Socket).destroy();
+            }
+            if (_mode == ProcessStartMode.pseudoTerminal) {
+              _ProcessUtils._closeTerminal(this);
             }
             resourceInfo.stopped();
           }

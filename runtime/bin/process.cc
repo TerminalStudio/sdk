@@ -263,6 +263,23 @@ void FUNCTION_NAME(Process_ResizeTerminal)(Dart_NativeArguments args) {
   }
 }
 
+void FUNCTION_NAME(Process_CloseTerminal)(Dart_NativeArguments args) {
+  intptr_t pty = 0;
+  Dart_Handle process = Dart_GetNativeArgument(args, 0);
+  Process::GetPseudoTerminalNativeField(process, &pty);
+
+  if (pty == 0) {
+    Dart_ThrowException(DartUtils::NewInternalError("No pseudo terminal"));
+  }
+
+  bool success = Process::CloseTerminal(pty);
+
+  if (!success) {
+    Dart_Handle error = DartUtils::NewDartOSError();
+    Dart_ThrowException(error);
+  }
+}
+
 void FUNCTION_NAME(Process_KillPid)(Dart_NativeArguments args) {
   intptr_t pid = DartUtils::GetIntptrValue(Dart_GetNativeArgument(args, 0));
   intptr_t signal = DartUtils::GetIntptrValue(Dart_GetNativeArgument(args, 1));

@@ -116,7 +116,9 @@ class Process {
                    intptr_t exit_handler,
                    ProcessResult* result);
 
-  static bool ResizeTerminal(intptr_t ptm,  int cols, int rows);
+  static bool ResizeTerminal(intptr_t pty, int cols, int rows);
+
+  static bool CloseTerminal(intptr_t pty);
 
   // Kill a process with a given pid.
   static bool Kill(intptr_t id, int signal);
@@ -159,8 +161,9 @@ class Process {
   static Dart_Handle SetProcessIdNativeField(Dart_Handle process, intptr_t pid);
 
   static Dart_Handle GetPseudoTerminalNativeField(Dart_Handle process,
-                                             intptr_t* ptm);
-  static Dart_Handle SetPseudoTerminalNativeField(Dart_Handle process, intptr_t ptm);
+                                                  intptr_t* ptm);
+  static Dart_Handle SetPseudoTerminalNativeField(Dart_Handle process,
+                                                  intptr_t ptm);
 
   static int64_t CurrentRSS();
   static int64_t MaxRSS();

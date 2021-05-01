@@ -12,7 +12,8 @@ class _ProcessUtils {
   external static int _getExitCode();
   external static void _sleep(int millis);
   external static int _pid(Process? process);
-  external static bool _resizeTerminal(Process? process, int cols, int rows);
+  external static void _resizeTerminal(Process? process, int cols, int rows);
+  external static void _closeTerminal(Process? process);
   external static Stream<ProcessSignal> _watchSignal(ProcessSignal signal);
 }
 

@@ -410,7 +410,7 @@ class ProcessStarter {
       close(pts_);
       close(*in_);
       close(*out_);
-      *in_ = ptm_;
+      *in_ = dup(ptm_);
       *out_ = dup(ptm_);
     }
 
@@ -983,6 +983,10 @@ bool Process::ResizeTerminal(intptr_t ptm, int cols, int rows) {
   size.ws_col = cols;
   size.ws_row = rows;
   return (TEMP_FAILURE_RETRY(ioctl(ptm, TIOCSWINSZ, &size)) != -1);
+}
+
+bool Process::CloseTerminal(intptr_t ptm) {
+  return (TEMP_FAILURE_RETRY(close(ptm)) != -1);
 }
 
 bool Process::Kill(intptr_t id, int signal) {

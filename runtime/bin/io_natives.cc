@@ -112,6 +112,7 @@ namespace bin {
   V(Process_SetSignalHandler, 1)                                               \
   V(Process_ClearSignalHandler, 1)                                             \
   V(Process_ResizeTerminal, 3)                                                 \
+  V(Process_CloseTerminal, 1)                                                  \
   V(ProcessInfo_CurrentRSS, 0)                                                 \
   V(ProcessInfo_MaxRSS, 0)                                                     \
   V(RawSocketOption_GetOptionValue, 1)                                         \

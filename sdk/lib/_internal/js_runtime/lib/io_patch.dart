@@ -328,8 +328,13 @@ class _ProcessUtils {
   }
 
   @patch
-  static bool _resizeTerminal(Process? process, int cols, int rows) {
+  static void _resizeTerminal(Process? process, int cols, int rows) {
     throw new UnsupportedError("ProcessUtils._resizeTerminal");
+  }
+
+  @patch
+  static void _closeTerminal(Process? process) {
+    throw new UnsupportedError("ProcessUtils._closeTerminal");
   }
 
   @patch
