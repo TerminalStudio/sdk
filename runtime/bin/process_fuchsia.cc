@@ -480,6 +480,18 @@ bool Process::Wait(intptr_t pid,
   return true;
 }
 
+bool Process::SupportsPseudoTerminal() {
+  return false;
+}
+
+bool Process::ResizePseudoTerminal(intptr_t pty, int cols, int rows) {
+  return false;
+}
+
+bool Process::ClosePseudoTerminal(intptr_t pty) {
+  return false;
+}
+
 bool Process::Kill(intptr_t id, int signal) {
   LOG_INFO("Sending signal %d to process with id %ld\n", signal, id);
   // zx_task_kill is definitely going to kill the process.
@@ -803,6 +815,7 @@ int Process::Start(Namespace* namespc,
                    intptr_t* out,
                    intptr_t* err,
                    intptr_t* id,
+                   intptr_t* pty,
                    intptr_t* exit_event,
                    char** os_error_message) {
   if (mode != kNormal) {

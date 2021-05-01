@@ -13,6 +13,7 @@
 #include <stdio.h>         // NOLINT
 #include <stdlib.h>        // NOLINT
 #include <string.h>        // NOLINT
+#include <sys/ioctl.h>     // NOLINT
 #include <sys/resource.h>  // NOLINT
 #include <sys/wait.h>      // NOLINT
 #include <unistd.h>        // NOLINT
@@ -265,6 +266,7 @@ class ProcessStarter {
                  intptr_t* out,
                  intptr_t* err,
                  intptr_t* id,
+                 intptr_t* pty,
                  intptr_t* exit_event,
                  char** os_error_message)
       : namespc_(namespc),
@@ -275,6 +277,7 @@ class ProcessStarter {
         out_(out),
         err_(err),
         id_(id),
+        pty_(pty),
         exit_event_(exit_event),
         os_error_message_(os_error_message) {
     read_in_[0] = -1;
@@ -285,6 +288,8 @@ class ProcessStarter {
     write_out_[1] = -1;
     exec_control_[0] = -1;
     exec_control_[1] = -1;
+    ptm_ = -1;
+    pts_ = -1;
 
     program_arguments_ = reinterpret_cast<char**>(Dart_ScopeAllocate(
         (arguments_length + 2) * sizeof(*program_arguments_)));
@@ -310,6 +315,13 @@ class ProcessStarter {
     int err = CreatePipes();
     if (err != 0) {
       return err;
+    }
+
+    if (mode_ == kPseudoTerminal) {
+      err = CreatePseudoTerminal();
+      if (err != 0) {
+        return err;
+      }
     }
 
     // Fork to create the new process.
@@ -394,7 +406,15 @@ class ProcessStarter {
     ASSERT(exec_control_[0] == -1);
     ASSERT(exec_control_[1] == -1);
 
+    if (mode_ == kPseudoTerminal) {
+      FDUtils::SetNonBlocking(ptm_);
+      dup2(ptm_, *in_);
+      dup2(ptm_, *out_);
+      close(pts_);
+    }
+
     *id_ = pid;
+    *pty_ = ptm_;
     return 0;
   }
 
@@ -428,6 +448,31 @@ class ProcessStarter {
       }
     }
 
+    return 0;
+  }
+
+  int CreatePseudoTerminal() {
+    intptr_t ptm = posix_openpt(O_RDWR);
+
+    if (ptm == -1) {
+      return CleanupAndReturnError();
+    }
+
+    if (TEMP_FAILURE_RETRY(grantpt(ptm)) == -1) {
+      return CleanupAndReturnError();
+    }
+
+    if (TEMP_FAILURE_RETRY(unlockpt(ptm)) == -1) {
+      return CleanupAndReturnError();
+    }
+
+    intptr_t pts = open(ptsname(ptm), O_RDWR);
+    if (pts == -1) {
+      return CleanupAndReturnError();
+    }
+
+    ptm_ = ptm;
+    pts_ = pts;
     return 0;
   }
 
@@ -490,6 +535,18 @@ class ProcessStarter {
       }
 
       if (TEMP_FAILURE_RETRY(dup2(read_err_[1], STDERR_FILENO)) == -1) {
+        ReportChildError();
+      }
+    } else if (mode_ == kPseudoTerminal) {
+      if (TEMP_FAILURE_RETRY(dup2(pts_, STDIN_FILENO)) == -1) {
+        ReportChildError();
+      }
+
+      if (TEMP_FAILURE_RETRY(dup2(pts_, STDOUT_FILENO)) == -1) {
+        ReportChildError();
+      }
+
+      if (TEMP_FAILURE_RETRY(dup2(pts_, STDERR_FILENO)) == -1) {
         ReportChildError();
       }
     } else {
@@ -703,6 +760,7 @@ class ProcessStarter {
     }
     SetChildOsErrorMessage();
     CloseAllPipes();
+    ClosePseudoTerminal();
     return actual_errno;
   }
 
@@ -769,10 +827,18 @@ class ProcessStarter {
     ClosePipe(write_out_);
   }
 
+  void ClosePseudoTerminal() {
+    close(ptm_);
+    close(pts_);
+  }
+
   int read_in_[2];       // Pipe for stdout to child process.
   int read_err_[2];      // Pipe for stderr to child process.
   int write_out_[2];     // Pipe for stdin to child process.
   int exec_control_[2];  // Pipe to get the result from exec.
+
+  intptr_t ptm_;
+  intptr_t pts_;
 
   char** program_arguments_;
   char** program_environment_;
@@ -785,6 +851,7 @@ class ProcessStarter {
   intptr_t* out_;
   intptr_t* err_;
   intptr_t* id_;
+  intptr_t* pty_;
   intptr_t* exit_event_;
   char** os_error_message_;
 
@@ -804,11 +871,13 @@ int Process::Start(Namespace* namespc,
                    intptr_t* out,
                    intptr_t* err,
                    intptr_t* id,
+                   intptr_t* pty,
                    intptr_t* exit_event,
                    char** os_error_message) {
   ProcessStarter starter(namespc, path, arguments, arguments_length,
                          working_directory, environment, environment_length,
-                         mode, in, out, err, id, exit_event, os_error_message);
+                         mode, in, out, err, id, pty, exit_event,
+                         os_error_message);
   return starter.Start();
 }
 
@@ -912,6 +981,21 @@ bool Process::Wait(intptr_t pid,
   result->set_exit_code(exit_code);
 
   return true;
+}
+
+bool Process::SupportsPseudoTerminal() {
+  return true;
+}
+
+bool Process::ResizePseudoTerminal(intptr_t ptm, int cols, int rows) {
+  winsize size;
+  size.ws_col = cols;
+  size.ws_row = rows;
+  return (TEMP_FAILURE_RETRY(ioctl(ptm, TIOCSWINSZ, &size)) != -1);
+}
+
+bool Process::ClosePseudoTerminal(intptr_t ptm) {
+  return (TEMP_FAILURE_RETRY(close(ptm)) != -1);
 }
 
 bool Process::Kill(intptr_t id, int signal) {

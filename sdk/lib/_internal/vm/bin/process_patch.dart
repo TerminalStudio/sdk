@@ -146,6 +146,11 @@ class _ProcessUtils {
   static int _pid(Process? process) native "Process_Pid";
   static bool _killPid(int pid, int signal) native "Process_KillPid";
   @patch
+  static void _resizeTerminal(Process? process, int cols, int rows) 
+      native "Process_ResizeTerminal";
+  @patch
+  static void _closeTerminal(Process? process) native "Process_CloseTerminal";
+  @patch
   static Stream<ProcessSignal> _watchSignal(ProcessSignal signal) {
     if (signal != ProcessSignal.sighup &&
         signal != ProcessSignal.sigint &&
@@ -202,7 +207,7 @@ class _ProcessStartStatus {
 
 // The NativeFieldWrapperClass1 can not be used with a mixin, due to missing
 // implicit constructor.
-class _ProcessImplNativeWrapper extends NativeFieldWrapperClass1 {}
+class _ProcessImplNativeWrapper extends NativeFieldWrapperClass2 {}
 
 class _ProcessImpl extends _ProcessImplNativeWrapper implements Process {
   static bool connectedResourceHandler = false;
@@ -289,12 +294,14 @@ class _ProcessImpl extends _ProcessImplNativeWrapper implements Process {
 
   static bool _modeIsAttached(ProcessStartMode mode) {
     return (mode == ProcessStartMode.normal) ||
-        (mode == ProcessStartMode.inheritStdio);
+        (mode == ProcessStartMode.inheritStdio) ||
+        (mode == ProcessStartMode.pseudoTerminal);
   }
 
   static bool _modeHasStdio(ProcessStartMode mode) {
     return (mode == ProcessStartMode.normal) ||
-        (mode == ProcessStartMode.detachedWithStdio);
+        (mode == ProcessStartMode.detachedWithStdio) ||
+        (mode == ProcessStartMode.pseudoTerminal);
   }
 
   static String _getShellCommand() {
@@ -439,6 +446,9 @@ class _ProcessImpl extends _ProcessImplNativeWrapper implements Process {
             if (_modeHasStdio(_mode)) {
               (_stdin!._sink as _Socket).destroy();
             }
+            if (_mode == ProcessStartMode.pseudoTerminal) {
+              _ProcessUtils._closeTerminal(this);
+            }
             resourceInfo.stopped();
           }
 
@@ -532,6 +542,18 @@ class _ProcessImpl extends _ProcessImplNativeWrapper implements Process {
   }
 
   int get pid => _ProcessUtils._pid(this);
+
+  void resizeTerminal(int cols, int rows) {
+    if (_mode != ProcessStartMode.pseudoTerminal) {
+      throw StateError("Process isn't attached to pseudo terminal");
+    }
+
+    if (_ended) {
+      return;
+    }
+
+    _ProcessUtils._resizeTerminal(this, cols, rows);
+  }
 
   late String _path;
   late List<String> _arguments;

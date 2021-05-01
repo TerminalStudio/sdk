@@ -215,22 +215,29 @@ enum NamedPipeType { kInheritRead, kInheritWrite, kInheritNone };
 // and the caller should make sure to close them in case of an error.
 static bool CreateProcessPipe(HANDLE handles[2],
                               wchar_t* pipe_name,
-                              NamedPipeType type) {
+                              NamedPipeType type,
+                              BOOL read_handle_overlapped = TRUE,
+                              BOOL write_handle_overlapped = TRUE) {
   // Security attributes describing an inheritable handle.
   SECURITY_ATTRIBUTES inherit_handle;
   inherit_handle.nLength = sizeof(SECURITY_ATTRIBUTES);
   inherit_handle.bInheritHandle = TRUE;
   inherit_handle.lpSecurityDescriptor = NULL;
 
+  int read_flag_overlapped =
+      read_handle_overlapped ? FILE_FLAG_OVERLAPPED : NULL;
+  int write_flag_overlapped =
+      write_handle_overlapped ? FILE_FLAG_OVERLAPPED : NULL;
+
   if (type == kInheritRead) {
-    handles[kWriteHandle] =
-        CreateNamedPipeW(pipe_name, PIPE_ACCESS_OUTBOUND | FILE_FLAG_OVERLAPPED,
-                         PIPE_TYPE_BYTE | PIPE_WAIT,
-                         1,     // Number of pipes
-                         1024,  // Out buffer size
-                         1024,  // In buffer size
-                         0,     // Timeout in ms
-                         NULL);
+    handles[kWriteHandle] = CreateNamedPipeW(
+        pipe_name, PIPE_ACCESS_OUTBOUND | write_flag_overlapped,
+        PIPE_TYPE_BYTE | PIPE_WAIT,
+        1,     // Number of pipes
+        1024,  // Out buffer size
+        1024,  // In buffer size
+        0,     // Timeout in ms
+        NULL);
 
     if (handles[kWriteHandle] == INVALID_HANDLE_VALUE) {
       Syslog::PrintErr("CreateNamedPipe failed %d\n", GetLastError());
@@ -239,7 +246,7 @@ static bool CreateProcessPipe(HANDLE handles[2],
 
     handles[kReadHandle] =
         CreateFileW(pipe_name, GENERIC_READ, 0, &inherit_handle, OPEN_EXISTING,
-                    FILE_READ_ATTRIBUTES | FILE_FLAG_OVERLAPPED, NULL);
+                    FILE_READ_ATTRIBUTES | read_flag_overlapped, NULL);
     if (handles[kReadHandle] == INVALID_HANDLE_VALUE) {
       Syslog::PrintErr("CreateFile failed %d\n", GetLastError());
       return false;
@@ -247,7 +254,7 @@ static bool CreateProcessPipe(HANDLE handles[2],
   } else {
     ASSERT((type == kInheritWrite) || (type == kInheritNone));
     handles[kReadHandle] =
-        CreateNamedPipeW(pipe_name, PIPE_ACCESS_INBOUND | FILE_FLAG_OVERLAPPED,
+        CreateNamedPipeW(pipe_name, PIPE_ACCESS_INBOUND | read_flag_overlapped,
                          PIPE_TYPE_BYTE | PIPE_WAIT,
                          1,     // Number of pipes
                          1024,  // Out buffer size
@@ -263,13 +270,30 @@ static bool CreateProcessPipe(HANDLE handles[2],
     handles[kWriteHandle] = CreateFileW(
         pipe_name, GENERIC_WRITE, 0,
         (type == kInheritWrite) ? &inherit_handle : NULL, OPEN_EXISTING,
-        FILE_WRITE_ATTRIBUTES | FILE_FLAG_OVERLAPPED, NULL);
+        FILE_WRITE_ATTRIBUTES | write_flag_overlapped, NULL);
     if (handles[kWriteHandle] == INVALID_HANDLE_VALUE) {
       Syslog::PrintErr("CreateFile failed %d\n", GetLastError());
       return false;
     }
   }
   return true;
+}
+
+// Create a pipe for communicating pseudo terminal. ConPty API requires the
+// communication channels provided to be synchronous.
+static bool CreateConptyPipe(HANDLE handles[2],
+                             wchar_t* pipe_name,
+                             NamedPipeType type) {
+  switch (type) {
+    case kInheritRead:
+      return CreateProcessPipe(handles, pipe_name, type, FALSE, TRUE);
+      break;
+    case kInheritWrite:
+      return CreateProcessPipe(handles, pipe_name, type, TRUE, FALSE);
+      break;
+    default:
+      UNREACHABLE();
+  }
 }
 
 static void CloseProcessPipe(HANDLE handles[2]) {
@@ -331,18 +355,32 @@ typedef BOOL(WINAPI* UpdateProcThreadAttrFn)(LPPROC_THREAD_ATTRIBUTE_LIST,
 
 typedef VOID(WINAPI* DeleteProcThreadAttrListFn)(LPPROC_THREAD_ATTRIBUTE_LIST);
 
+typedef HRESULT(WINAPI* CreatePseudoConsoleFn)(COORD size,
+                                               HANDLE hInput,
+                                               HANDLE hOutput,
+                                               DWORD dwFlags,
+                                               VOID** phPC);
+
+typedef HRESULT(WINAPI* ResizePseudoConsoleFn)(VOID* hPC, COORD size);
+
+typedef VOID(WINAPI* ClosePseudoConsoleFn)(VOID* hPC);
+
 static InitProcThreadAttrListFn init_proc_thread_attr_list = NULL;
 static UpdateProcThreadAttrFn update_proc_thread_attr = NULL;
 static DeleteProcThreadAttrListFn delete_proc_thread_attr_list = NULL;
 
-static Mutex* initialized_mutex = nullptr;
-static bool load_attempted = false;
+static CreatePseudoConsoleFn create_pseudo_console = NULL;
+static ResizePseudoConsoleFn resize_pseudo_console = NULL;
+static ClosePseudoConsoleFn close_pseudo_console = NULL;
 
-static bool EnsureInitialized() {
+static Mutex* thread_attr_initialized_mutex = nullptr;
+static bool thread_attr_load_attempted = false;
+
+static bool EnsureThreadAttrInitialized() {
   HMODULE kernel32_module = GetModuleHandleW(L"kernel32.dll");
-  if (!load_attempted) {
-    MutexLocker locker(initialized_mutex);
-    if (load_attempted) {
+  if (!thread_attr_load_attempted) {
+    MutexLocker locker(thread_attr_initialized_mutex);
+    if (thread_attr_load_attempted) {
       return (delete_proc_thread_attr_list != NULL);
     }
     init_proc_thread_attr_list = reinterpret_cast<InitProcThreadAttrListFn>(
@@ -351,10 +389,35 @@ static bool EnsureInitialized() {
         GetProcAddress(kernel32_module, "UpdateProcThreadAttribute"));
     delete_proc_thread_attr_list = reinterpret_cast<DeleteProcThreadAttrListFn>(
         GetProcAddress(kernel32_module, "DeleteProcThreadAttributeList"));
-    load_attempted = true;
+
+    thread_attr_load_attempted = true;
     return (delete_proc_thread_attr_list != NULL);
   }
   return (delete_proc_thread_attr_list != NULL);
+}
+
+static Mutex* conpty_initialized_mutex = nullptr;
+static bool conpty_load_attempted = false;
+
+static bool EnsureConPtyInitialized() {
+  HMODULE kernel32_module = GetModuleHandleW(L"kernel32.dll");
+  if (!conpty_load_attempted) {
+    MutexLocker locker(conpty_initialized_mutex);
+    if (conpty_load_attempted) {
+      return (create_pseudo_console != NULL);
+    }
+
+    create_pseudo_console = reinterpret_cast<CreatePseudoConsoleFn>(
+        GetProcAddress(kernel32_module, "CreatePseudoConsole"));
+    resize_pseudo_console = reinterpret_cast<ResizePseudoConsoleFn>(
+        GetProcAddress(kernel32_module, "ResizePseudoConsole"));
+    close_pseudo_console = reinterpret_cast<ClosePseudoConsoleFn>(
+        GetProcAddress(kernel32_module, "ClosePseudoConsole"));
+
+    conpty_load_attempted = true;
+    return (create_pseudo_console != NULL);
+  }
+  return (create_pseudo_console != NULL);
 }
 
 const int kMaxPipeNameSize = 80;
@@ -395,6 +458,7 @@ class ProcessStarter {
                  intptr_t* out,
                  intptr_t* err,
                  intptr_t* id,
+                 intptr_t* pty,
                  intptr_t* exit_handler,
                  char** os_error_message)
       : path_(path),
@@ -404,6 +468,7 @@ class ProcessStarter {
         out_(out),
         err_(err),
         id_(id),
+        pty_(pty),
         exit_handler_(exit_handler),
         os_error_message_(os_error_message) {
     stdin_handles_[kReadHandle] = INVALID_HANDLE_VALUE;
@@ -414,6 +479,7 @@ class ProcessStarter {
     stderr_handles_[kWriteHandle] = INVALID_HANDLE_VALUE;
     exit_handles_[kReadHandle] = INVALID_HANDLE_VALUE;
     exit_handles_[kWriteHandle] = INVALID_HANDLE_VALUE;
+    pseudo_console_ = INVALID_HANDLE_VALUE;
 
     // Transform input strings to system format.
     const wchar_t* system_path = StringUtilsWin::Utf8ToWide(path_);
@@ -505,17 +571,31 @@ class ProcessStarter {
       return err;
     }
 
+    // Create pseudo console if needed.
+    if (mode_ == kPseudoTerminal) {
+      err = CreatePseudoTerminal();
+      if (err != 0) {
+        return err;
+      }
+    }
+
     // Setup info structures.
     STARTUPINFOEXW startup_info;
     ZeroMemory(&startup_info, sizeof(startup_info));
     startup_info.StartupInfo.cb = sizeof(startup_info);
     if (mode_ != kInheritStdio) {
-      startup_info.StartupInfo.hStdInput = stdin_handles_[kReadHandle];
-      startup_info.StartupInfo.hStdOutput = stdout_handles_[kWriteHandle];
-      startup_info.StartupInfo.hStdError = stderr_handles_[kWriteHandle];
+      if (mode_ == kPseudoTerminal) {
+        startup_info.StartupInfo.hStdInput = NULL;
+        startup_info.StartupInfo.hStdOutput = NULL;
+        startup_info.StartupInfo.hStdError = NULL;
+      } else {
+        startup_info.StartupInfo.hStdInput = stdin_handles_[kReadHandle];
+        startup_info.StartupInfo.hStdOutput = stdout_handles_[kWriteHandle];
+        startup_info.StartupInfo.hStdError = stderr_handles_[kWriteHandle];
+      }
       startup_info.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
 
-      bool supports_proc_thread_attr_lists = EnsureInitialized();
+      bool supports_proc_thread_attr_lists = EnsureThreadAttrInitialized();
       if (supports_proc_thread_attr_lists) {
         // Setup the handles to inherit. We only want to inherit the three
         // handles for stdin, stdout and stderr.
@@ -532,14 +612,23 @@ class ProcessStarter {
         if (!init_proc_thread_attr_list(attribute_list_, 1, 0, &size)) {
           return CleanupAndReturnError();
         }
-        inherited_handles_ = {stdin_handles_[kReadHandle],
-                              stdout_handles_[kWriteHandle],
-                              stderr_handles_[kWriteHandle]};
-        if (!update_proc_thread_attr(
-                attribute_list_, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
-                inherited_handles_.data(),
-                inherited_handles_.size() * sizeof(HANDLE), NULL, NULL)) {
-          return CleanupAndReturnError();
+        if (mode_ == kPseudoTerminal) {
+          const int proc_thread_attribute_pseudoconsole = 131094;
+          if (!update_proc_thread_attr(
+                  attribute_list_, 0, proc_thread_attribute_pseudoconsole,
+                  pseudo_console_, sizeof(VOID*), NULL, NULL)) {
+            return CleanupAndReturnError();
+          }
+        } else {
+          inherited_handles_ = {stdin_handles_[kReadHandle],
+                                stdout_handles_[kWriteHandle],
+                                stderr_handles_[kWriteHandle]};
+          if (!update_proc_thread_attr(
+                  attribute_list_, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+                  inherited_handles_.data(),
+                  inherited_handles_.size() * sizeof(HANDLE), NULL, NULL)) {
+            return CleanupAndReturnError();
+          }
         }
         startup_info.lpAttributeList = attribute_list_;
       }
@@ -599,6 +688,7 @@ class ProcessStarter {
 
     // Return process id.
     *id_ = process_info.dwProcessId;
+    *pty_ = (intptr_t)pseudo_console_;
     return 0;
   }
 
@@ -615,7 +705,13 @@ class ProcessStarter {
     if (mode_ != kDetached) {
       // Open pipes for stdin, stdout, stderr and for communicating the exit
       // code.
-      if (Process::ModeHasStdio(mode_)) {
+      if (mode_ == kPseudoTerminal) {
+        if (!CreateConptyPipe(stdin_handles_, pipe_names[0], kInheritRead) ||
+            !CreateConptyPipe(stdout_handles_, pipe_names[1], kInheritWrite) ||
+            !CreateProcessPipe(stderr_handles_, pipe_names[2], kInheritWrite)) {
+          return CleanupAndReturnError();
+        }
+      } else if (Process::ModeHasStdio(mode_)) {
         if (!CreateProcessPipe(stdin_handles_, pipe_names[0], kInheritRead) ||
             !CreateProcessPipe(stdout_handles_, pipe_names[1], kInheritWrite) ||
             !CreateProcessPipe(stderr_handles_, pipe_names[2], kInheritWrite)) {
@@ -648,10 +744,30 @@ class ProcessStarter {
     return 0;
   }
 
+  int CreatePseudoTerminal() {
+    HRESULT result = create_pseudo_console(
+        {80, 24}, stdin_handles_[kReadHandle], stdout_handles_[kWriteHandle], 0,
+        &pseudo_console_);
+
+    if (result != S_OK) {
+      return CleanupAndReturnError();
+    }
+
+    return 0;
+  }
+
+  void ClosePseudoConsole() {
+    if (close_pseudo_console != NULL &&
+        pseudo_console_ != INVALID_HANDLE_VALUE) {
+      close_pseudo_console(pseudo_console_);
+    }
+  }
+
   int CleanupAndReturnError() {
     int error_code = SetOsErrorMessage(os_error_message_);
     CloseProcessPipes(stdin_handles_, stdout_handles_, stderr_handles_,
                       exit_handles_);
+    ClosePseudoConsole();
     return error_code;
   }
 
@@ -659,6 +775,8 @@ class ProcessStarter {
   HANDLE stdout_handles_[2];
   HANDLE stderr_handles_[2];
   HANDLE exit_handles_[2];
+
+  void* pseudo_console_;
 
   const wchar_t* system_working_directory_;
   wchar_t* command_line_;
@@ -673,6 +791,7 @@ class ProcessStarter {
   intptr_t* out_;
   intptr_t* err_;
   intptr_t* id_;
+  intptr_t* pty_;
   intptr_t* exit_handler_;
   char** os_error_message_;
 
@@ -693,11 +812,12 @@ int Process::Start(Namespace* namespc,
                    intptr_t* out,
                    intptr_t* err,
                    intptr_t* id,
+                   intptr_t* pty,
                    intptr_t* exit_handler,
                    char** os_error_message) {
   ProcessStarter starter(path, arguments, arguments_length, working_directory,
                          environment, environment_length, mode, in, out, err,
-                         id, exit_handler, os_error_message);
+                         id, pty, exit_handler, os_error_message);
   return starter.Start();
 }
 
@@ -898,6 +1018,26 @@ bool Process::Wait(intptr_t pid,
     exit_code = -exit_code;
   }
   result->set_exit_code(exit_code);
+  return true;
+}
+
+bool Process::SupportsPseudoTerminal() {
+  return EnsureConPtyInitialized() == true;
+}
+
+bool Process::ResizePseudoTerminal(intptr_t pty, int cols, int rows) {
+  COORD coord;
+  coord.X = cols;
+  coord.Y = rows;
+
+  HRESULT hr = resize_pseudo_console((VOID*)pty, coord);
+  return hr == S_OK;
+}
+
+bool Process::ClosePseudoTerminal(intptr_t pty) {
+  if ((VOID*)pty != NULL) {
+    close_pseudo_console((VOID*)pty);
+  }
   return true;
 }
 
@@ -1111,8 +1251,11 @@ void Process::Init() {
   ASSERT(signal_mutex == nullptr);
   signal_mutex = new Mutex();
 
-  ASSERT(initialized_mutex == nullptr);
-  initialized_mutex = new Mutex();
+  ASSERT(thread_attr_initialized_mutex == nullptr);
+  thread_attr_initialized_mutex = new Mutex();
+
+  ASSERT(conpty_initialized_mutex == nullptr);
+  conpty_initialized_mutex = new Mutex();
 
   ASSERT(Process::global_exit_code_mutex_ == nullptr);
   Process::global_exit_code_mutex_ = new Mutex();
@@ -1125,9 +1268,13 @@ void Process::Cleanup() {
   delete signal_mutex;
   signal_mutex = nullptr;
 
-  ASSERT(initialized_mutex != nullptr);
-  delete initialized_mutex;
-  initialized_mutex = nullptr;
+  ASSERT(thread_attr_initialized_mutex != nullptr);
+  delete thread_attr_initialized_mutex;
+  thread_attr_initialized_mutex = nullptr;
+
+  ASSERT(conpty_initialized_mutex != nullptr);
+  delete conpty_initialized_mutex;
+  conpty_initialized_mutex = nullptr;
 
   ASSERT(Process::global_exit_code_mutex_ != nullptr);
   delete Process::global_exit_code_mutex_;
