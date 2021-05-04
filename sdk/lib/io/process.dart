@@ -151,10 +151,11 @@ class ProcessStartMode {
         normal,
         inheritStdio,
         detached,
-        detachedWithStdio
+        detachedWithStdio,
+        pseudoTerminal,
       ];
   String toString() =>
-      const ["normal", "inheritStdio", "detached", "detachedWithStdio"][_mode];
+      const ["normal", "inheritStdio", "detached", "detachedWithStdio", "pseudoTerminal"][_mode];
 
   final int _mode;
   const ProcessStartMode._internal(this._mode);
