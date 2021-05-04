@@ -408,10 +408,8 @@ class ProcessStarter {
 
     if (mode_ == kPseudoTerminal) {
       close(pts_);
-      close(*in_);
-      close(*out_);
-      *in_ = dup(ptm_);
-      *out_ = dup(ptm_);
+      dup2(ptm_, *in_);
+      dup2(ptm_, *out_);
     }
 
     *id_ = pid;
