@@ -18,7 +18,9 @@
 #include <stdio.h>      // NOLINT
 #include <stdlib.h>     // NOLINT
 #include <string.h>     // NOLINT
+#include <sys/ioctl.h>  // NOLINT
 #include <unistd.h>     // NOLINT
+#include <util.h>       // NOLINT
 
 #include "bin/dartutils.h"
 #include "bin/fdutils.h"
@@ -260,6 +262,7 @@ class ProcessStarter {
                  intptr_t* out,
                  intptr_t* err,
                  intptr_t* id,
+                 intptr_t* pty,
                  intptr_t* exit_event,
                  char** os_error_message)
       : path_(path),
@@ -269,6 +272,7 @@ class ProcessStarter {
         out_(out),
         err_(err),
         id_(id),
+        pty_(pty),
         exit_event_(exit_event),
         os_error_message_(os_error_message) {
     read_in_[0] = -1;
@@ -279,6 +283,8 @@ class ProcessStarter {
     write_out_[1] = -1;
     exec_control_[0] = -1;
     exec_control_[1] = -1;
+    ptm_ = -1;
+    pts_ = -1;
 
     program_arguments_ = reinterpret_cast<char**>(Dart_ScopeAllocate(
         (arguments_length + 2) * sizeof(*program_arguments_)));
@@ -304,6 +310,13 @@ class ProcessStarter {
     int err = CreatePipes();
     if (err != 0) {
       return err;
+    }
+
+    if (mode_ == kPseudoTerminal) {
+      err = CreatePseudoTerminal();
+      if (err != 0) {
+        return err;
+      }
     }
 
     // Fork to create the new process.
@@ -388,7 +401,15 @@ class ProcessStarter {
     ASSERT(exec_control_[0] == -1);
     ASSERT(exec_control_[1] == -1);
 
+    if (mode_ == kPseudoTerminal) {
+      FDUtils::SetNonBlocking(ptm_);
+      dup2(ptm_, *in_);
+      dup2(ptm_, *out_);
+      close(pts_);
+    }
+
     *id_ = pid;
+    *pty_ = ptm_;
     return 0;
   }
 
@@ -431,6 +452,18 @@ class ProcessStarter {
     return 0;
   }
 
+  int CreatePseudoTerminal() {
+    int ptm, pts;
+
+    if (TEMP_FAILURE_RETRY(openpty(&ptm, &pts, NULL, NULL, NULL)) == -1) {
+      return CleanupAndReturnError();
+    }
+
+    ptm_ = ptm;
+    pts_ = pts;
+    return 0;
+  }
+
   void NewProcess() {
     // Wait for parent process before setting up the child process.
     char msg;
@@ -439,6 +472,13 @@ class ProcessStarter {
       perror("Failed receiving notification message");
       exit(1);
     }
+
+    // int ttyfd = open("/dev/tty", O_WRONLY);
+    // if (ttyfd == -1) {
+    //   perror("Failed to open /dev/tty");
+    // }
+    //     CHECK(close(ttyfd) != -1);
+
     if (Process::ModeIsAttached(mode_)) {
       ExecProcess();
     } else {
@@ -457,6 +497,20 @@ class ProcessStarter {
       }
 
       if (TEMP_FAILURE_RETRY(dup2(read_err_[1], STDERR_FILENO)) == -1) {
+        ReportChildError();
+      }
+    } else if (mode_ == kPseudoTerminal) {
+      close(ptm_);
+
+      if (TEMP_FAILURE_RETRY(dup2(pts_, STDIN_FILENO)) == -1) {
+        ReportChildError();
+      }
+
+      if (TEMP_FAILURE_RETRY(dup2(pts_, STDOUT_FILENO)) == -1) {
+        ReportChildError();
+      }
+
+      if (TEMP_FAILURE_RETRY(dup2(pts_, STDERR_FILENO)) == -1) {
         ReportChildError();
       }
     } else {
@@ -535,12 +589,12 @@ class ProcessStarter {
           execvp(path_, const_cast<char* const*>(program_arguments_));
           ReportChildError();
         } else {
-          // Exit the intermeiate process.
+          // Exit the intermediate process.
           exit(0);
         }
       }
     } else {
-      // Exit the intermeiate process.
+      // Exit the intermediate process.
       exit(0);
     }
   }
@@ -741,6 +795,9 @@ class ProcessStarter {
   int write_out_[2];     // Pipe for stdin to child process.
   int exec_control_[2];  // Pipe to get the result from exec.
 
+  intptr_t ptm_;
+  intptr_t pts_;
+
   char** program_arguments_;
   char** program_environment_;
 
@@ -751,6 +808,7 @@ class ProcessStarter {
   intptr_t* out_;
   intptr_t* err_;
   intptr_t* id_;
+  intptr_t* pty_;
   intptr_t* exit_event_;
   char** os_error_message_;
 
@@ -770,11 +828,12 @@ int Process::Start(Namespace* namespc,
                    intptr_t* out,
                    intptr_t* err,
                    intptr_t* id,
+                   intptr_t* pty,
                    intptr_t* exit_event,
                    char** os_error_message) {
   ProcessStarter starter(path, arguments, arguments_length, working_directory,
                          environment, environment_length, mode, in, out, err,
-                         id, exit_event, os_error_message);
+                         id, pty, exit_event, os_error_message);
   return starter.Start();
 }
 
@@ -884,6 +943,17 @@ bool Process::Wait(intptr_t pid,
   result->set_exit_code(exit_code);
 
   return true;
+}
+
+bool Process::ResizeTerminal(intptr_t ptm, int cols, int rows) {
+  winsize size;
+  size.ws_col = cols;
+  size.ws_row = rows;
+  return (TEMP_FAILURE_RETRY(ioctl(ptm, TIOCSWINSZ, &size)) != -1);
+}
+
+bool Process::CloseTerminal(intptr_t ptm) {
+  return (TEMP_FAILURE_RETRY(close(ptm)) != -1);
 }
 
 static int SignalMap(intptr_t id) {
