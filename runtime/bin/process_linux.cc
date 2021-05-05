@@ -407,9 +407,10 @@ class ProcessStarter {
     ASSERT(exec_control_[1] == -1);
 
     if (mode_ == kPseudoTerminal) {
-      close(pts_);
+      FDUtils::SetNonBlocking(ptm_);
       dup2(ptm_, *in_);
       dup2(ptm_, *out_);
+      close(pts_);
     }
 
     *id_ = pid;
