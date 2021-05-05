@@ -12,6 +12,8 @@ class _ProcessUtils {
   external static int _getExitCode();
   external static void _sleep(int millis);
   external static int _pid(Process? process);
+  external static void _resizeTerminal(Process? process, int cols, int rows);
+  external static void _closeTerminal(Process? process);
   external static Stream<ProcessSignal> _watchSignal(ProcessSignal signal);
 }
 
@@ -143,14 +145,17 @@ class ProcessStartMode {
   @Deprecated("Use detachedWithStdio instead")
   static const DETACHED_WITH_STDIO = detachedWithStdio;
 
+  static const pseudoTerminal = const ProcessStartMode._internal(4);
+
   static List<ProcessStartMode> get values => const <ProcessStartMode>[
         normal,
         inheritStdio,
         detached,
-        detachedWithStdio
+        detachedWithStdio,
+        pseudoTerminal,
       ];
   String toString() =>
-      const ["normal", "inheritStdio", "detached", "detachedWithStdio"][_mode];
+      const ["normal", "inheritStdio", "detached", "detachedWithStdio", "pseudoTerminal"][_mode];
 
   final int _mode;
   const ProcessStartMode._internal(this._mode);
@@ -440,6 +445,8 @@ abstract class Process {
   /// process. Otherwise the signal could not be sent, usually meaning
   /// that the process is already dead.
   bool kill([ProcessSignal signal = ProcessSignal.sigterm]);
+
+  void resizeTerminal(int cols, int rows);
 }
 
 /// The result of running a non-interactive

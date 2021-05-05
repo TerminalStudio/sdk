@@ -395,6 +395,7 @@ class ProcessStarter {
                  intptr_t* out,
                  intptr_t* err,
                  intptr_t* id,
+                 intptr_t* pty,
                  intptr_t* exit_handler,
                  char** os_error_message)
       : path_(path),
@@ -693,11 +694,12 @@ int Process::Start(Namespace* namespc,
                    intptr_t* out,
                    intptr_t* err,
                    intptr_t* id,
+                   intptr_t* pty,
                    intptr_t* exit_handler,
                    char** os_error_message) {
   ProcessStarter starter(path, arguments, arguments_length, working_directory,
                          environment, environment_length, mode, in, out, err,
-                         id, exit_handler, os_error_message);
+                         id, pty, exit_handler, os_error_message);
   return starter.Start();
 }
 

@@ -803,6 +803,7 @@ int Process::Start(Namespace* namespc,
                    intptr_t* out,
                    intptr_t* err,
                    intptr_t* id,
+                   intptr_t* pty,
                    intptr_t* exit_event,
                    char** os_error_message) {
   if (mode != kNormal) {

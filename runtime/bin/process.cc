@@ -18,6 +18,7 @@ namespace dart {
 namespace bin {
 
 static const int kProcessIdNativeField = 0;
+static const int kPseudoTerminalNativeField = 1;
 
 // Extract an array of C strings from a list of Dart strings.
 static char** ExtractCStringList(Dart_Handle strings,
@@ -60,11 +61,15 @@ static char** ExtractCStringList(Dart_Handle strings,
 }
 
 bool Process::ModeIsAttached(ProcessStartMode mode) {
-  return (mode == kNormal) || (mode == kInheritStdio);
+  return (mode == kNormal) ||
+    (mode == kInheritStdio) ||
+    (mode == kPseudoTerminal);
 }
 
 bool Process::ModeHasStdio(ProcessStartMode mode) {
-  return (mode == kNormal) || (mode == kDetachedWithStdio);
+  return (mode == kNormal) ||
+    (mode == kDetachedWithStdio) ||
+    (mode == kPseudoTerminal);
 }
 
 void Process::ClearAllSignalHandlers() {
@@ -133,19 +138,20 @@ void FUNCTION_NAME(Process_Start)(Dart_NativeArguments args) {
     }
   }
   int64_t mode =
-      DartUtils::GetInt64ValueCheckRange(Dart_GetNativeArgument(args, 6), 0, 3);
+      DartUtils::GetInt64ValueCheckRange(Dart_GetNativeArgument(args, 6), 0, 4);
   Dart_Handle stdin_handle = Dart_GetNativeArgument(args, 7);
   Dart_Handle stdout_handle = Dart_GetNativeArgument(args, 8);
   Dart_Handle stderr_handle = Dart_GetNativeArgument(args, 9);
   Dart_Handle exit_handle = Dart_GetNativeArgument(args, 10);
   intptr_t pid = -1;
+  intptr_t pty = -1;
   char* os_error_message = NULL;  // Scope allocated by Process::Start.
 
   int error_code = Process::Start(
       namespc, path, string_args, args_length, working_directory,
       string_environment, environment_length,
       static_cast<ProcessStartMode>(mode), &process_stdout, &process_stdin,
-      &process_stderr, &pid, &exit_event, &os_error_message);
+      &process_stderr, &pid, &pty, &exit_event, &os_error_message);
   if (error_code == 0) {
     if (Process::ModeHasStdio(static_cast<ProcessStartMode>(mode))) {
       Socket::SetSocketIdNativeField(stdin_handle, process_stdin,
@@ -158,6 +164,9 @@ void FUNCTION_NAME(Process_Start)(Dart_NativeArguments args) {
     if (Process::ModeIsAttached(static_cast<ProcessStartMode>(mode))) {
       Socket::SetSocketIdNativeField(exit_handle, exit_event,
                                      Socket::kFinalizerNormal);
+    }
+    if (static_cast<ProcessStartMode>(mode) == kPseudoTerminal) {
+      Process::SetPseudoTerminalNativeField(process, pty);
     }
     Process::SetProcessIdNativeField(process, pid);
   } else {
@@ -234,6 +243,43 @@ void FUNCTION_NAME(Process_Wait)(Dart_NativeArguments args) {
   }
 }
 
+void FUNCTION_NAME(Process_ResizeTerminal)(Dart_NativeArguments args) {
+  intptr_t pty = 0;
+  Dart_Handle process = Dart_GetNativeArgument(args, 0);
+  Process::GetPseudoTerminalNativeField(process, &pty);
+
+  if (pty == 0) {
+    Dart_ThrowException(DartUtils::NewInternalError("No pseudo terminal"));
+  }
+
+  intptr_t cols = DartUtils::GetIntptrValue(Dart_GetNativeArgument(args, 1));
+  intptr_t rows = DartUtils::GetIntptrValue(Dart_GetNativeArgument(args, 2));
+
+  bool success = Process::ResizeTerminal(pty, cols, rows);
+
+  if (!success) {
+    Dart_Handle error = DartUtils::NewDartOSError();
+    Dart_ThrowException(error);
+  }
+}
+
+void FUNCTION_NAME(Process_CloseTerminal)(Dart_NativeArguments args) {
+  intptr_t pty = 0;
+  Dart_Handle process = Dart_GetNativeArgument(args, 0);
+  Process::GetPseudoTerminalNativeField(process, &pty);
+
+  if (pty == 0) {
+    Dart_ThrowException(DartUtils::NewInternalError("No pseudo terminal"));
+  }
+
+  bool success = Process::CloseTerminal(pty);
+
+  if (!success) {
+    Dart_Handle error = DartUtils::NewDartOSError();
+    Dart_ThrowException(error);
+  }
+}
+
 void FUNCTION_NAME(Process_KillPid)(Dart_NativeArguments args) {
   intptr_t pid = DartUtils::GetIntptrValue(Dart_GetNativeArgument(args, 0));
   intptr_t signal = DartUtils::GetIntptrValue(Dart_GetNativeArgument(args, 1));
@@ -304,6 +350,16 @@ Dart_Handle Process::GetProcessIdNativeField(Dart_Handle process,
 Dart_Handle Process::SetProcessIdNativeField(Dart_Handle process,
                                              intptr_t pid) {
   return Dart_SetNativeInstanceField(process, kProcessIdNativeField, pid);
+}
+
+Dart_Handle Process::GetPseudoTerminalNativeField(Dart_Handle process,
+                                             intptr_t* ptm) {
+  return Dart_GetNativeInstanceField(process, kPseudoTerminalNativeField, ptm);
+}
+
+Dart_Handle Process::SetPseudoTerminalNativeField(Dart_Handle process,
+                                             intptr_t ptm) {
+  return Dart_SetNativeInstanceField(process, kPseudoTerminalNativeField, ptm);
 }
 
 void FUNCTION_NAME(SystemEncodingToString)(Dart_NativeArguments args) {
