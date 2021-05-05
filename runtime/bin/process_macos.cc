@@ -473,12 +473,6 @@ class ProcessStarter {
       exit(1);
     }
 
-    // int ttyfd = open("/dev/tty", O_WRONLY);
-    // if (ttyfd == -1) {
-    //   perror("Failed to open /dev/tty");
-    // }
-    //     CHECK(close(ttyfd) != -1);
-
     if (Process::ModeIsAttached(mode_)) {
       ExecProcess();
     } else {
