@@ -455,6 +455,7 @@ class ProcessStarter {
     stderr_handles_[kWriteHandle] = INVALID_HANDLE_VALUE;
     exit_handles_[kReadHandle] = INVALID_HANDLE_VALUE;
     exit_handles_[kWriteHandle] = INVALID_HANDLE_VALUE;
+    hPseudoConsole = INVALID_HANDLE_VALUE;
 
     // Transform input strings to system format.
     const wchar_t* system_path = StringUtilsWin::Utf8ToWide(path_);
@@ -719,8 +720,9 @@ class ProcessStarter {
     return 0;
   }
 
-  void ClosePseudoTerminal() {
-    if (close_pseudo_console != NULL && hPseudoConsole != NULL) {
+  void ClosePseudoConsole() {
+    if (close_pseudo_console != NULL &&
+        hPseudoConsole != INVALID_HANDLE_VALUE) {
       close_pseudo_console(hPseudoConsole);
     }
   }
@@ -729,7 +731,7 @@ class ProcessStarter {
     int error_code = SetOsErrorMessage(os_error_message_);
     CloseProcessPipes(stdin_handles_, stdout_handles_, stderr_handles_,
                       exit_handles_);
-    ClosePseudoTerminal();
+    ClosePseudoConsole();
     return error_code;
   }
 
