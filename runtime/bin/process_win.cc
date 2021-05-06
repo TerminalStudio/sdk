@@ -708,15 +708,28 @@ class ProcessStarter {
   }
 
   int CreatePseudoTerminal() {
-    create_pseudo_console({80, 24}, stdin_handles_[kReadHandle],
-                          stdout_handles_[kWriteHandle], 0, &hPseudoConsole);
+    HRESULT result = create_pseudo_console(
+        {80, 24}, stdin_handles_[kReadHandle], stdout_handles_[kWriteHandle], 0,
+        &hPseudoConsole);
+
+    if (result != S_OK) {
+      return CleanupAndReturnError();
+    }
+
     return 0;
+  }
+
+  void ClosePseudoTerminal() {
+    if (close_pseudo_console != NULL && hPseudoConsole != NULL) {
+      close_pseudo_console(hPseudoConsole);
+    }
   }
 
   int CleanupAndReturnError() {
     int error_code = SetOsErrorMessage(os_error_message_);
     CloseProcessPipes(stdin_handles_, stdout_handles_, stderr_handles_,
                       exit_handles_);
+    ClosePseudoTerminal();
     return error_code;
   }
 
