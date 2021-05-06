@@ -61,15 +61,13 @@ static char** ExtractCStringList(Dart_Handle strings,
 }
 
 bool Process::ModeIsAttached(ProcessStartMode mode) {
-  return (mode == kNormal) ||
-    (mode == kInheritStdio) ||
-    (mode == kPseudoTerminal);
+  return (mode == kNormal) || (mode == kInheritStdio) ||
+         (mode == kPseudoTerminal);
 }
 
 bool Process::ModeHasStdio(ProcessStartMode mode) {
-  return (mode == kNormal) ||
-    (mode == kDetachedWithStdio) ||
-    (mode == kPseudoTerminal);
+  return (mode == kNormal) || (mode == kDetachedWithStdio) ||
+         (mode == kPseudoTerminal);
 }
 
 void Process::ClearAllSignalHandlers() {
@@ -146,6 +144,13 @@ void FUNCTION_NAME(Process_Start)(Dart_NativeArguments args) {
   intptr_t pid = -1;
   intptr_t pty = -1;
   char* os_error_message = NULL;  // Scope allocated by Process::Start.
+
+  if (static_cast<ProcessStartMode>(mode) == kPseudoTerminal) {
+    if (!Process::SupportsPseudoTerminal()) {
+      Dart_ThrowException(DartUtils::NewDartUnsupportedError(
+          "Pseudo terminal is not supported on this platform"));
+    }
+  }
 
   int error_code = Process::Start(
       namespc, path, string_args, args_length, working_directory,
@@ -255,7 +260,7 @@ void FUNCTION_NAME(Process_ResizeTerminal)(Dart_NativeArguments args) {
   intptr_t cols = DartUtils::GetIntptrValue(Dart_GetNativeArgument(args, 1));
   intptr_t rows = DartUtils::GetIntptrValue(Dart_GetNativeArgument(args, 2));
 
-  bool success = Process::ResizeTerminal(pty, cols, rows);
+  bool success = Process::ResizePseudoTerminal(pty, cols, rows);
 
   if (!success) {
     Dart_Handle error = DartUtils::NewDartOSError();
@@ -272,7 +277,7 @@ void FUNCTION_NAME(Process_CloseTerminal)(Dart_NativeArguments args) {
     Dart_ThrowException(DartUtils::NewInternalError("No pseudo terminal"));
   }
 
-  bool success = Process::CloseTerminal(pty);
+  bool success = Process::ClosePseudoTerminal(pty);
 
   if (!success) {
     Dart_Handle error = DartUtils::NewDartOSError();
@@ -353,12 +358,12 @@ Dart_Handle Process::SetProcessIdNativeField(Dart_Handle process,
 }
 
 Dart_Handle Process::GetPseudoTerminalNativeField(Dart_Handle process,
-                                             intptr_t* ptm) {
+                                                  intptr_t* ptm) {
   return Dart_GetNativeInstanceField(process, kPseudoTerminalNativeField, ptm);
 }
 
 Dart_Handle Process::SetPseudoTerminalNativeField(Dart_Handle process,
-                                             intptr_t ptm) {
+                                                  intptr_t ptm) {
   return Dart_SetNativeInstanceField(process, kPseudoTerminalNativeField, ptm);
 }
 

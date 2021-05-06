@@ -331,18 +331,32 @@ typedef BOOL(WINAPI* UpdateProcThreadAttrFn)(LPPROC_THREAD_ATTRIBUTE_LIST,
 
 typedef VOID(WINAPI* DeleteProcThreadAttrListFn)(LPPROC_THREAD_ATTRIBUTE_LIST);
 
+typedef HRESULT(WINAPI* CreatePseudoConsoleFn)(COORD size,
+                                               HANDLE hInput,
+                                               HANDLE hOutput,
+                                               DWORD dwFlags,
+                                               VOID** phPC);
+
+typedef HRESULT(WINAPI* ResizePseudoConsoleFn)(VOID* hPC, COORD size);
+
+typedef VOID(WINAPI* ClosePseudoConsoleFn)(VOID* hPC);
+
 static InitProcThreadAttrListFn init_proc_thread_attr_list = NULL;
 static UpdateProcThreadAttrFn update_proc_thread_attr = NULL;
 static DeleteProcThreadAttrListFn delete_proc_thread_attr_list = NULL;
 
-static Mutex* initialized_mutex = nullptr;
-static bool load_attempted = false;
+static CreatePseudoConsoleFn create_pseudo_console = NULL;
+static ResizePseudoConsoleFn resize_pseudo_console = NULL;
+static ClosePseudoConsoleFn close_pseudo_console = NULL;
 
-static bool EnsureInitialized() {
+static Mutex* thread_attr_initialized_mutex = nullptr;
+static bool thread_attr_load_attempted = false;
+
+static bool EnsureThreadAttrInitialized() {
   HMODULE kernel32_module = GetModuleHandleW(L"kernel32.dll");
-  if (!load_attempted) {
-    MutexLocker locker(initialized_mutex);
-    if (load_attempted) {
+  if (!thread_attr_load_attempted) {
+    MutexLocker locker(thread_attr_initialized_mutex);
+    if (thread_attr_load_attempted) {
       return (delete_proc_thread_attr_list != NULL);
     }
     init_proc_thread_attr_list = reinterpret_cast<InitProcThreadAttrListFn>(
@@ -351,10 +365,35 @@ static bool EnsureInitialized() {
         GetProcAddress(kernel32_module, "UpdateProcThreadAttribute"));
     delete_proc_thread_attr_list = reinterpret_cast<DeleteProcThreadAttrListFn>(
         GetProcAddress(kernel32_module, "DeleteProcThreadAttributeList"));
-    load_attempted = true;
+
+    thread_attr_load_attempted = true;
     return (delete_proc_thread_attr_list != NULL);
   }
   return (delete_proc_thread_attr_list != NULL);
+}
+
+static Mutex* conpty_initialized_mutex = nullptr;
+static bool conpty_load_attempted = false;
+
+static bool EnsureConPtyInitialized() {
+  HMODULE kernel32_module = GetModuleHandleW(L"kernel32.dll");
+  if (!conpty_load_attempted) {
+    MutexLocker locker(conpty_initialized_mutex);
+    if (conpty_load_attempted) {
+      return (create_pseudo_console != NULL);
+    }
+
+    create_pseudo_console = reinterpret_cast<CreatePseudoConsoleFn>(
+        GetProcAddress(kernel32_module, "CreatePseudoConsole"));
+    resize_pseudo_console = reinterpret_cast<ResizePseudoConsoleFn>(
+        GetProcAddress(kernel32_module, "ResizePseudoConsole"));
+    close_pseudo_console = reinterpret_cast<ClosePseudoConsoleFn>(
+        GetProcAddress(kernel32_module, "ClosePseudoConsole"));
+
+    conpty_load_attempted = true;
+    return (create_pseudo_console != NULL);
+  }
+  return (create_pseudo_console != NULL);
 }
 
 const int kMaxPipeNameSize = 80;
@@ -405,6 +444,7 @@ class ProcessStarter {
         out_(out),
         err_(err),
         id_(id),
+        pty_(pty),
         exit_handler_(exit_handler),
         os_error_message_(os_error_message) {
     stdin_handles_[kReadHandle] = INVALID_HANDLE_VALUE;
@@ -506,6 +546,14 @@ class ProcessStarter {
       return err;
     }
 
+    // Create pseudo console if needed.
+    if (mode_ == kPseudoTerminal) {
+      err = CreatePseudoTerminal();
+      if (err != 0) {
+        return err;
+      }
+    }
+
     // Setup info structures.
     STARTUPINFOEXW startup_info;
     ZeroMemory(&startup_info, sizeof(startup_info));
@@ -516,7 +564,7 @@ class ProcessStarter {
       startup_info.StartupInfo.hStdError = stderr_handles_[kWriteHandle];
       startup_info.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
 
-      bool supports_proc_thread_attr_lists = EnsureInitialized();
+      bool supports_proc_thread_attr_lists = EnsureThreadAttrInitialized();
       if (supports_proc_thread_attr_lists) {
         // Setup the handles to inherit. We only want to inherit the three
         // handles for stdin, stdout and stderr.
@@ -533,14 +581,23 @@ class ProcessStarter {
         if (!init_proc_thread_attr_list(attribute_list_, 1, 0, &size)) {
           return CleanupAndReturnError();
         }
-        inherited_handles_ = {stdin_handles_[kReadHandle],
-                              stdout_handles_[kWriteHandle],
-                              stderr_handles_[kWriteHandle]};
-        if (!update_proc_thread_attr(
-                attribute_list_, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
-                inherited_handles_.data(),
-                inherited_handles_.size() * sizeof(HANDLE), NULL, NULL)) {
-          return CleanupAndReturnError();
+        if (mode_ == kPseudoTerminal) {
+          const int proc_thread_attribute_pseudoconsole = 131094;
+          if (!update_proc_thread_attr(
+                  attribute_list_, 0, proc_thread_attribute_pseudoconsole,
+                  hPseudoConsole, sizeof(VOID*), NULL, NULL)) {
+            return CleanupAndReturnError();
+          }
+        } else {
+          inherited_handles_ = {stdin_handles_[kReadHandle],
+                                stdout_handles_[kWriteHandle],
+                                stderr_handles_[kWriteHandle]};
+          if (!update_proc_thread_attr(
+                  attribute_list_, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+                  inherited_handles_.data(),
+                  inherited_handles_.size() * sizeof(HANDLE), NULL, NULL)) {
+            return CleanupAndReturnError();
+          }
         }
         startup_info.lpAttributeList = attribute_list_;
       }
@@ -600,6 +657,7 @@ class ProcessStarter {
 
     // Return process id.
     *id_ = process_info.dwProcessId;
+    *pty_ = (intptr_t)hPseudoConsole;
     return 0;
   }
 
@@ -649,6 +707,12 @@ class ProcessStarter {
     return 0;
   }
 
+  int CreatePseudoTerminal() {
+    create_pseudo_console({80, 24}, stdin_handles_[kReadHandle],
+                          stdout_handles_[kWriteHandle], 0, &hPseudoConsole);
+    return 0;
+  }
+
   int CleanupAndReturnError() {
     int error_code = SetOsErrorMessage(os_error_message_);
     CloseProcessPipes(stdin_handles_, stdout_handles_, stderr_handles_,
@@ -660,6 +724,8 @@ class ProcessStarter {
   HANDLE stdout_handles_[2];
   HANDLE stderr_handles_[2];
   HANDLE exit_handles_[2];
+
+  void* hPseudoConsole;
 
   const wchar_t* system_working_directory_;
   wchar_t* command_line_;
@@ -674,6 +740,7 @@ class ProcessStarter {
   intptr_t* out_;
   intptr_t* err_;
   intptr_t* id_;
+  intptr_t* pty_;
   intptr_t* exit_handler_;
   char** os_error_message_;
 
@@ -903,6 +970,26 @@ bool Process::Wait(intptr_t pid,
   return true;
 }
 
+bool Process::SupportsPseudoTerminal() {
+  return EnsureConPtyInitialized() == true;
+}
+
+bool Process::ResizePseudoTerminal(intptr_t pty, int cols, int rows) {
+  COORD coord;
+  coord.X = cols;
+  coord.Y = rows;
+
+  HRESULT hr = resize_pseudo_console((VOID*)pty, coord);
+  return hr == S_OK;
+}
+
+bool Process::ClosePseudoTerminal(intptr_t pty) {
+  if ((VOID*)pty != NULL) {
+    close_pseudo_console((VOID*)pty);
+  }
+  return true;
+}
+
 bool Process::Kill(intptr_t id, int signal) {
   USE(signal);  // signal is not used on Windows.
   HANDLE process_handle;
@@ -1113,8 +1200,11 @@ void Process::Init() {
   ASSERT(signal_mutex == nullptr);
   signal_mutex = new Mutex();
 
-  ASSERT(initialized_mutex == nullptr);
-  initialized_mutex = new Mutex();
+  ASSERT(thread_attr_initialized_mutex == nullptr);
+  thread_attr_initialized_mutex = new Mutex();
+
+  ASSERT(conpty_initialized_mutex == nullptr);
+  conpty_initialized_mutex = new Mutex();
 
   ASSERT(Process::global_exit_code_mutex_ == nullptr);
   Process::global_exit_code_mutex_ = new Mutex();
@@ -1127,9 +1217,13 @@ void Process::Cleanup() {
   delete signal_mutex;
   signal_mutex = nullptr;
 
-  ASSERT(initialized_mutex != nullptr);
-  delete initialized_mutex;
-  initialized_mutex = nullptr;
+  ASSERT(thread_attr_initialized_mutex != nullptr);
+  delete thread_attr_initialized_mutex;
+  thread_attr_initialized_mutex = nullptr;
+
+  ASSERT(conpty_initialized_mutex != nullptr);
+  delete conpty_initialized_mutex;
+  conpty_initialized_mutex = nullptr;
 
   ASSERT(Process::global_exit_code_mutex_ != nullptr);
   delete Process::global_exit_code_mutex_;

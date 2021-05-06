@@ -116,9 +116,11 @@ class Process {
                    intptr_t exit_handler,
                    ProcessResult* result);
 
-  static bool ResizeTerminal(intptr_t pty, int cols, int rows);
+  static bool SupportsPseudoTerminal();
 
-  static bool CloseTerminal(intptr_t pty);
+  static bool ResizePseudoTerminal(intptr_t pty, int cols, int rows);
+
+  static bool ClosePseudoTerminal(intptr_t pty);
 
   // Kill a process with a given pid.
   static bool Kill(intptr_t id, int signal);
